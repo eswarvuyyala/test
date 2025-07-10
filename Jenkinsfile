@@ -2,10 +2,18 @@ pipeline {
     agent any
 
     environment {
-        GIT_REPO          = 'https://github.com/eswarvuyyala/test.git'
-        SONAR_PROJECT_KEY = 'new-test-sonar1'
-        SONAR_HOST        = 'http://13.201.203.112:9000'
-        IMAGE_NAME        = 'new-test-sonar1'
+        // GitHub repo
+        GIT_REPO = 'https://github.com/eswarvuyyala/react-app.git'
+
+        // SonarQube settings
+        SONAR_HOST = 'http://13.201.203.112:9000'
+        SONAR_PROJECT_KEY = 'react-app'
+        SONAR_CREDENTIALS_ID = 'new-test-sonar1'
+
+        // Docker image info
+        IMAGE_NAME = 'react-app'
+        IMAGE_TAG = "v1.0.${BUILD_NUMBER}"
+        FULL_IMAGE_NAME = "${IMAGE_NAME}:${IMAGE_TAG}"
     }
 
     stages {
@@ -16,69 +24,50 @@ pipeline {
         }
 
         stage('SonarQube Scan') {
+            environment {
+                SONAR_TOKEN = credentials("${SONAR_CREDENTIALS_ID}")
+            }
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh """
-                        mvn clean verify sonar:sonar \
-                          -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                          -Dsonar.host.url=${SONAR_HOST}
-                    """
-                }
+                sh """
+                    sonar-scanner \
+                      -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                      -Dsonar.sources=. \
+                      -Dsonar.host.url=${SONAR_HOST} \
+                      -Dsonar.login=${SONAR_TOKEN}
+                """
             }
         }
 
-        stage('Bump Version') {
+        stage('Remove Existing Docker Image (if any)') {
             steps {
                 script {
-                    def versionFile = 'version.txt'
-                    def currentVersion = 'v1.0'
-
-                    if (fileExists(versionFile)) {
-                        currentVersion = readFile(versionFile).trim()
-                        def (major, minor) = currentVersion.replace('v', '').tokenize('.').collect { it.toInteger() }
-                        def newMinor = minor + 1
-                        env.IMAGE_TAG = "v${major}.${newMinor}"
-                    } else {
-                        env.IMAGE_TAG = currentVersion
-                    }
-
-                    echo "🚀 New Docker image version: ${env.IMAGE_TAG}"
-                    writeFile file: versionFile, text: "${env.IMAGE_TAG}"
-
-                    // Commit new version back to repo
-                    withCredentials([usernamePassword(credentialsId: 'git-credentials', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                        sh """
-                            git config user.name "jenkins"
-                            git config user.email "jenkins@local"
-                            git add ${versionFile}
-                            git commit -m "🔖 Bump version to ${env.IMAGE_TAG}" || true
-                            git push https://${GIT_USER}:${GIT_PASS}@https://github.com/eswarvuyyala/test.git HEAD:main
-                        """
-                    }
+                    sh "docker rmi -f ${FULL_IMAGE_NAME} || true"
                 }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh "docker rmi -f ${IMAGE_NAME}:${env.IMAGE_TAG} || true"
-                sh "docker build -t ${IMAGE_NAME}:${env.IMAGE_TAG} ."
+                sh "docker build -t ${FULL_IMAGE_NAME} ."
             }
         }
 
         stage('Trivy Scan Docker Image') {
             steps {
-                sh "trivy image ${IMAGE_NAME}:${env.IMAGE_TAG} --format table --output trivy-report.txt"
+                sh """
+                    trivy image --exit-code 0 --severity HIGH,CRITICAL --format table --output trivy-report.txt ${FULL_IMAGE_NAME}
+                    cat trivy-report.txt
+                """
             }
         }
     }
 
     post {
         success {
-            echo "✅ Build completed successfully with image: ${IMAGE_NAME}:${env.IMAGE_TAG}"
+            echo '✅ Pipeline completed successfully.'
         }
         failure {
-            echo "❌ Build failed"
+            echo '❌ Pipeline failed.'
         }
     }
 }
